@@ -1,72 +1,100 @@
 import { useState, useMemo } from 'react';
 import { hierarchy, tree } from 'd3-hierarchy';
 
-/**
- * Standalone Mind Map Component
- * Just pass JSON data and it renders an interactive, scrollable mind map
- * 
- * Usage:
- * <MindMap data={yourJsonData} />
- */
+/* -------------------- CONFIG -------------------- */
+const FONT_SIZE = 16;
+const FONT = `${FONT_SIZE}px ui-sans-serif, system-ui`;
+const LINE_HEIGHT = 20;
+const MAX_TEXT_WIDTH = 260;
+const PADDING_X = 22;
+const PADDING_Y = 18;
+const CONNECTOR_RADIUS = 9;
+const CONNECTOR_OVERLAP = 0;
 
-// Helper functions
+/* -------------------- TEXT UTILS -------------------- */
+function measureText(text, font = FONT) {
+    if (typeof document === 'undefined') return 100;
+    const canvas = measureText.canvas || (measureText.canvas = document.createElement('canvas'));
+    const ctx = canvas.getContext('2d');
+    ctx.font = font;
+    return ctx.measureText(text).width;
+}
+
+function wrapText(text, maxWidth) {
+    const words = String(text).split(' ');
+    const lines = [];
+    let line = '';
+
+    for (const word of words) {
+        const test = line ? `${line} ${word}` : word;
+        if (measureText(test) > maxWidth && line) {
+            lines.push(line);
+            line = word;
+        } else {
+            line = test;
+        }
+    }
+    if (line) lines.push(line);
+    return lines;
+}
+
+/* -------------------- DATA HELPERS -------------------- */
 function normalizeTree(input) {
     if (!input || typeof input !== 'object') return null;
     let auto = 0;
+
     const walk = (node) => {
-        if (!node || typeof node !== 'object') return null;
+        if (!node) return null;
         const id = node.id ?? `auto_${auto++}`;
         const label = node.label ?? node.name ?? String(id);
-        const raw = Array.isArray(node.children) ? node.children : [];
-        const children = raw.map(walk).filter((c) => c && c.id);
+        const children = Array.isArray(node.children)
+            ? node.children.map(walk).filter(Boolean)
+            : [];
         return { id, label, children };
     };
+
     return walk(input);
 }
 
 function collectExpandableIds(node, set) {
-    if (!node) return set;
-    if (node.children?.length) set.add(node.id);
+    if (node?.children?.length) set.add(node.id);
     node.children?.forEach((c) => collectExpandableIds(c, set));
     return set;
 }
 
 function buildVisibleTree(node, expanded) {
     if (!node) return null;
-    const kids = Array.isArray(node.children) ? node.children.filter((c) => c && c.id) : [];
-    if (!kids.length) return { ...node, children: [] };
     if (!expanded.has(node.id)) return { ...node, children: [] };
-    return {
-        ...node,
-        children: kids.map((c) => buildVisibleTree(c, expanded)).filter(Boolean),
-    };
+    return { ...node, children: node.children.map((c) => buildVisibleTree(c, expanded)) };
 }
 
+/* -------------------- LINK CURVE -------------------- */
 function diagonal(s, t) {
-    const midX = (s.x + t.x) / 2;
-    return `M ${s.x} ${s.y} C ${midX} ${s.y}, ${midX} ${t.y}, ${t.x} ${t.y}`;
+    const dx = t.x - s.x;
+    const curve = Math.min(200, Math.abs(dx) * 0.6);
+
+    return `
+    M ${s.x} ${s.y}
+    C ${s.x + curve} ${s.y},
+      ${t.x - curve} ${t.y},
+      ${t.x} ${t.y}
+  `;
 }
 
+/* -------------------- COMPONENT -------------------- */
 const MindMap = ({
     data,
-    nodeSpacing = { x: 360, y: 120 },
-    animationDuration = 260,
-    padding = 60,
+    nodeSpacing = { x: 380, y: 140 },
+    padding = 80,
     colors = {
-        root: { fill: '#b9c7ff', stroke: '#6f86ff' },
-        branch: { fill: '#bfe3ff', stroke: '#6aa6d9' },
-        leaf: { fill: '#bff5d0', stroke: '#6aa6d9' },
-        link: '#b7c5dd',
+        root: { fill: '#c7d2fe', stroke: '#6366f1' },
+        branch: { fill: '#bae6fd', stroke: '#0284c7' },
+        leaf: { fill: '#bbf7d0', stroke: '#16a34a' },
+        link: '#c7d2fe',
     },
-    nodeRadius = 7,
-    nodeLabelGap = 14,
-    onNodeClick = null,
-    onNodeExpand = null,
-    className = '',
-    style = {},
 }) => {
     const safeData = useMemo(() => normalizeTree(data), [data]);
-    const [expanded, setExpanded] = useState(() => new Set());
+    const [expanded, setExpanded] = useState(new Set());
 
     const expandableIds = useMemo(() => {
         if (!safeData) return new Set();
@@ -79,238 +107,181 @@ const MindMap = ({
     }, [safeData, expanded]);
 
     const layout = useMemo(() => {
-        if (!visibleData) {
-            return { nodes: [], links: [], bounds: { minX: 0, minY: 0, maxX: 1000, maxY: 600 } };
-        }
+        if (!visibleData) return { nodes: [], links: [], bounds: { maxX: 1200, maxY: 800 } };
 
         const root = hierarchy(visibleData);
-        const layoutFn = tree().nodeSize([nodeSpacing.y, nodeSpacing.x]);
-        const t = layoutFn(root);
+        tree().nodeSize([nodeSpacing.y, nodeSpacing.x])(root);
 
-        const dn = t.descendants();
-        const lk = t.links();
-
-        const LABEL_X = nodeRadius + nodeLabelGap;
-
-        const nodes = dn.map((n) => {
-            const label = n.data.label ?? n.data.id;
-            const paddingX = 14;
-            const paddingY = 10;
-            const textW = Math.min(640, Math.max(90, String(label).length * 7.2));
-            const boxW = textW + paddingX * 2;
-            const boxH = 34 + paddingY;
+        const nodes = root.descendants().map((n) => {
+            const lines = wrapText(n.data.label, MAX_TEXT_WIDTH);
+            const textWidth = Math.max(...lines.map(measureText));
+            const boxW = textWidth + PADDING_X * 2;
+            const boxH = lines.length * LINE_HEIGHT + PADDING_Y * 2;
 
             return {
                 id: n.data.id,
-                label,
-                x: n.y,
-                y: n.x,
+                label: n.data.label,
+                lines,
                 depth: n.depth,
                 hasChildren: expandableIds.has(n.data.id),
+                x: n.y,
+                y: n.x,
                 boxW,
                 boxH,
             };
         });
 
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
-        for (const n of nodes) {
-            const left = n.x;
-            const right = n.x + LABEL_X + n.boxW;
-            const top = n.y - n.boxH / 2;
-            const bottom = n.y + n.boxH / 2;
-
-            minX = Math.min(minX, left);
-            maxX = Math.max(maxX, right);
-            minY = Math.min(minY, top);
-            maxY = Math.max(maxY, bottom);
-        }
+        nodes.forEach((n) => {
+            minX = Math.min(minX, n.x);
+            minY = Math.min(minY, n.y - n.boxH / 2);
+            maxX = Math.max(maxX, n.x + n.boxW + 40);
+            maxY = Math.max(maxY, n.y + n.boxH / 2);
+        });
 
         const shiftX = padding - minX;
         const shiftY = padding - minY;
 
-        const shiftedNodes = nodes.map((n) => ({
-            ...n,
-            x: n.x + shiftX,
-            y: n.y + shiftY,
-        }));
+        nodes.forEach((n) => {
+            n.x += shiftX;
+            n.y += shiftY;
+        });
 
-        const byId = new Map(shiftedNodes.map((n) => [n.id, n]));
+        const byId = new Map(nodes.map((n) => [n.id, n]));
 
-        const links = lk.map((l) => {
+        const links = root.links().map((l) => {
             const s = byId.get(l.source.data.id);
-            const tnode = byId.get(l.target.data.id);
-
-            const sAttach = { x: s.x + LABEL_X + s.boxW, y: s.y };
-            const tAttach = { x: tnode.x + LABEL_X, y: tnode.y };
-
+            const t = byId.get(l.target.data.id);
             return {
-                id: `${s.id}__${tnode.id}`,
-                source: sAttach,
-                target: tAttach,
+                id: `${s.id}-${t.id}`,
+                source: { x: s.x, y: s.y },
+                target: { x: t.x + CONNECTOR_RADIUS, y: t.y },
             };
         });
 
-        const bounds = {
-            minX: padding,
-            minY: padding,
-            maxX: maxX + shiftX + padding,
-            maxY: maxY + shiftY + padding,
+        return {
+            nodes,
+            links,
+            bounds: {
+                maxX: maxX + shiftX + padding,
+                maxY: maxY + shiftY + padding,
+            },
         };
-
-        return { nodes: shiftedNodes, links, bounds };
-    }, [visibleData, expandableIds, nodeSpacing, padding, nodeRadius, nodeLabelGap]);
+    }, [visibleData, expandableIds, nodeSpacing, padding]);
 
     const toggle = (id) => {
         if (!expandableIds.has(id)) return;
-
         setExpanded((prev) => {
             const next = new Set(prev);
-            const wasExpanded = next.has(id);
-
-            if (wasExpanded) {
-                next.delete(id);
-            } else {
-                next.add(id);
-            }
-
-            if (onNodeExpand) {
-                onNodeExpand(id, !wasExpanded);
-            }
-
+            next.has(id) ? next.delete(id) : next.add(id);
             return next;
         });
     };
 
-    const handleNodeClick = (node) => {
-        if (node.hasChildren) {
-            toggle(node.id);
-        }
-        if (onNodeClick) {
-            onNodeClick(node);
-        }
-    };
-
-    if (!safeData) {
-        return (
-            <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-                No data provided
-            </div>
-        );
-    }
+    if (!safeData) return <div>No data</div>;
 
     return (
-        <div
-            className={`relative w-full h-full bg-white ${className}`}
-            style={{ ...style, overflow: 'auto' }}
-        >
-            <style>{`
-        .mm-node {
-          transition: transform ${animationDuration}ms ease;
-          transform-box: fill-box;
-          transform-origin: 0 0;
-        }
-        .mm-label {
-          transition: transform ${animationDuration}ms ease, opacity ${animationDuration}ms ease;
-          transform-origin: left center;
-        }
-        .mm-link path {
-          opacity: 0.9;
-          transition: opacity ${animationDuration}ms ease;
-        }
-      `}</style>
+        <div style={{ width: '100%', height: '100%', overflow: 'auto', background: '#fff' }}>
+            <svg width={layout.bounds.maxX} height={layout.bounds.maxY}>
+                {/* Links */}
+                {layout.links.map((l) => (
+                    <path
+                        key={l.id}
+                        d={diagonal(l.source, l.target)}
+                        fill="none"
+                        stroke={colors.link}
+                        strokeWidth="2"
+                        style={{ transition: 'all 300ms ease' }}
+                    />
+                ))}
 
-            <svg
-                width={layout.bounds.maxX}
-                height={layout.bounds.maxY}
-                viewBox={`0 0 ${layout.bounds.maxX} ${layout.bounds.maxY}`}
-                style={{ display: 'block' }}
-            >
-                <g className="mm-link">
-                    {layout.links.map((lnk) => (
-                        <path
-                            key={lnk.id}
-                            d={diagonal(lnk.source, lnk.target)}
-                            fill="none"
-                            stroke={colors.link}
-                            strokeWidth={2}
-                        />
-                    ))}
-                </g>
+                {/* Nodes */}
+                {layout.nodes.map((n) => {
+                    const isRoot = n.depth === 0;
+                    const fill = isRoot
+                        ? colors.root.fill
+                        : n.hasChildren
+                            ? colors.branch.fill
+                            : colors.leaf.fill;
 
-                <g>
-                    {layout.nodes.map((n) => {
-                        const isExpanded = expanded.has(n.id);
-                        const isRoot = n.depth === 0;
+                    const stroke = isRoot
+                        ? colors.root.stroke
+                        : n.hasChildren
+                            ? colors.branch.stroke
+                            : colors.leaf.stroke;
 
-                        let fill, stroke;
-                        if (isRoot) {
-                            fill = colors.root.fill;
-                            stroke = colors.root.stroke;
-                        } else if (n.hasChildren) {
-                            fill = colors.branch.fill;
-                            stroke = colors.branch.stroke;
-                        } else {
-                            fill = colors.leaf.fill;
-                            stroke = colors.leaf.stroke;
-                        }
+                    return (
+                        <g
+                            key={n.id}
+                            transform={`translate(${n.x}, ${n.y})`}
+                            style={{ transition: 'transform 300ms ease' }}
+                        >
+                            {/* Label box (shifted right) */}
+                            <g transform={`translate(${CONNECTOR_RADIUS - CONNECTOR_OVERLAP}, ${-n.boxH / 2})`}>
+                                <rect
+                                    width={n.boxW}
+                                    height={n.boxH}
+                                    rx="14"
+                                    fill={fill}
+                                    stroke={stroke}
+                                    strokeWidth="2"
+                                />
 
-                        const labelTransform = `translate(${nodeLabelGap}, ${-n.boxH / 2}) scale(${n.hasChildren ? (isExpanded ? 1 : 0.985) : 1
-                            })`;
+                                {/* Centered text */}
+                                <text
+                                    fontSize={FONT_SIZE}
+                                    fontFamily="system-ui"
+                                    fill="#1f2937"
+                                    textAnchor="middle"
+                                >
+                                    {n.lines.map((line, i) => (
+                                        <tspan
+                                            key={i}
+                                            x={n.boxW / 2}
+                                            y={
+                                                n.boxH / 2 -
+                                                ((n.lines.length - 1) * LINE_HEIGHT) / 2 +
+                                                i * LINE_HEIGHT +
+                                                6
+                                            }
+                                        >
+                                            {line}
+                                        </tspan>
+                                    ))}
+                                </text>
+                            </g>
 
-                        return (
+                            {/* Connector dot (overlapping box) */}
                             <g
-                                key={n.id}
-                                className="mm-node"
-                                transform={`translate(${n.x}, ${n.y})`}
+                                transform={`translate(${CONNECTOR_RADIUS}, 0)`}
+                                onClick={() => toggle(n.id)}
                                 style={{ cursor: n.hasChildren ? 'pointer' : 'default' }}
-                                onClick={() => handleNodeClick(n)}
                             >
                                 <circle
-                                    r={nodeRadius}
+                                    r={CONNECTOR_RADIUS}
                                     fill="#fff"
                                     stroke={stroke}
                                     strokeWidth="2"
                                 />
 
-                                <g className="mm-label" transform={labelTransform}>
-                                    <rect
-                                        width={n.boxW}
-                                        height={n.boxH}
-                                        rx="12"
-                                        ry="12"
-                                        fill={fill}
-                                        stroke={stroke}
-                                        strokeWidth="1.5"
-                                        opacity="0.98"
-                                    />
+                                {n.hasChildren && (
                                     <text
-                                        x={14}
-                                        y={n.boxH / 2 + 5}
+                                        textAnchor="middle"
+                                        dominantBaseline="middle"
                                         fontSize="14"
-                                        fontFamily="ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial"
-                                        fill="#1f2a44"
+                                        fontWeight="600"
+                                        fill={stroke}
+                                        pointerEvents="none"
                                     >
-                                        {n.label}
+                                        {expanded.has(n.id) ? '−' : '+'}
                                     </text>
-
-                                    {n.hasChildren && (
-                                        <text
-                                            x={n.boxW - 18}
-                                            y={n.boxH / 2 + 5}
-                                            fontSize="16"
-                                            fontFamily="ui-sans-serif, system-ui"
-                                            fill="#1f2a44"
-                                            opacity="0.8"
-                                        >
-                                            {isExpanded ? '−' : '+'}
-                                        </text>
-                                    )}
-                                </g>
+                                )}
                             </g>
-                        );
-                    })}
-                </g>
+
+                        </g>
+                    );
+                })}
             </svg>
         </div>
     );
