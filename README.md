@@ -111,4 +111,4 @@ Built with:
 
 ---
 
-Made with ❤️ by [Your Name]# mind-map-react
+Made with ❤️ by Abdullah# mind-map-react
